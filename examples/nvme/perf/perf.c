@@ -165,6 +165,7 @@ static int g_time_in_sec;
 static uint32_t g_max_completions;
 static uint32_t g_lambda;  //avg requests per second to generate (exponential distribution)
 static double g_avg_req_per_cycle;
+static char* g_file_name;
 
 static const char *g_core_mask;
 
@@ -749,7 +750,41 @@ static void usage(char *program_name)
 	printf("\t[-L lambda (avg arrival req rate)]\n");
 	printf("\t\t(if specificied, I/O generator is open-loop with exponential distribution)\n");
 	printf("\t\t(default: no lambda (closed-loop I/O generator based on queue depth) )\n");
+	printf("\t[-d distribution of inter-arrival requests (for open-loop)]\n");
+	printf("\t\t(exp, fixed)\n");
+	printf("\t\t(default: exp, i.e. exponential)\n");
 }
+
+static int 
+partition(double a[], int l, int r) {
+	double t, pivot;
+	int i, j;
+   	pivot = a[l];
+   	i = l; j = r+1;
+		
+	while( 1){
+   		do ++i; while( a[i] <= pivot && i <= r );
+   		do --j; while( a[j] > pivot );
+   		if( i >= j ) break;
+   		t = a[i]; a[i] = a[j]; a[j] = t;
+   	}
+   	t = a[l]; a[l] = a[j]; a[j] = t;
+   	return j;
+}
+
+static void 
+quickSort(double a[], int l, int r)
+{
+	int j;
+
+	if( l < r ){
+   		// divide and conquer
+        j = partition( a, l, r);
+       	quickSort( a, l, j-1);
+       	quickSort( a, j+1, r);
+   	}
+}
+
 
 static double
 get_nth_percentile(struct ns_worker_ctx *ctx, int io_type, int n)
@@ -765,8 +800,16 @@ print_performance(void)
 	float total_io_per_second[NUM_IO_TYPES], total_mb_per_second[NUM_IO_TYPES], total_average_latency[NUM_IO_TYPES];
 	struct worker_thread	*worker;
 	struct ns_worker_ctx	*ns_ctx;
+	FILE 					*f = NULL;
 	int i;
 
+	if (g_file_name){
+		f = fopen(g_file_name, "a");
+		if (f == NULL){
+			printf("Cannot open output file %s!!\n", g_file_name);
+		}
+
+	}
 	
 	for (i = 0; i < NUM_IO_TYPES; i++){
 		total_io_per_second[i] = 0;
@@ -799,15 +842,15 @@ print_performance(void)
 					total_tsc[i] += ns_ctx->total_tsc[i];
 					total_io_completed[i] += ns_ctx->io_completed[i];
 
-
-
+					quickSort(ns_ctx->lat_samples[i], 0, ns_ctx->num_samples[i] -1);
 					printf("10th percentile: %f\n", get_nth_percentile(ns_ctx, i, 10)); 
 					printf("50th percentile: %f\n", get_nth_percentile(ns_ctx, i, 50)); 
 					printf("95th percentile: %f\n", get_nth_percentile(ns_ctx, i, 95)); 
 					printf("99th percentile: %f\n", get_nth_percentile(ns_ctx, i, 99));
 					printf("Num_sampled = %lu, Num_ios = %lu\n", ns_ctx->num_samples[i],
 						   ns_ctx->io_completed[i]);
-				}	
+				}
+
 			}
 			ns_ctx = ns_ctx->next;
 		}
@@ -835,8 +878,21 @@ print_performance(void)
 	if (g_open_loop){
 		printf("Dropped %d requests\n", dropped_count);
 	}
-
 	printf("\n");
+
+	worker = g_workers;
+	ns_ctx = worker->ns_ctx;
+	if (f) {
+		fprintf(f, "%10.2f; %10.2f; %f; %f; %f; %f; %f; %f; ; %d \n",
+			total_io_per_second[READ], total_io_per_second[WRITE],
+			total_average_latency[READ],
+			get_nth_percentile(ns_ctx, READ, 95),
+			get_nth_percentile(ns_ctx, READ, 99),
+			total_average_latency[WRITE],
+			get_nth_percentile(ns_ctx, WRITE, 95),
+			get_nth_percentile(ns_ctx, WRITE, 99),
+			dropped_count);
+	}
 }
 
 static void
@@ -926,6 +982,7 @@ parse_args(int argc, char **argv)
 	const char *workload_type;
 	int op;
 	bool mix_specified = false;
+	const char *distribution = "exp";
 
 	/* default value*/
 	g_queue_depth = 0;
@@ -937,8 +994,9 @@ parse_args(int argc, char **argv)
 	g_max_completions = 0;
 	g_open_loop = false;
 	g_lambda = 1;
+	g_file_name = NULL;
 
-	while ((op = getopt(argc, argv, "c:lm:q:s:t:w:M:L:")) != -1) {
+	while ((op = getopt(argc, argv, "c:l:m:q:s:t:w:M:L:d:o:")) != -1) {
 		switch (op) {
 		case 'c':
 			g_core_mask = optarg;
@@ -969,6 +1027,12 @@ parse_args(int argc, char **argv)
 			g_open_loop = true;
 			g_lambda = strtod(optarg, NULL);
 			break;
+		case 'd':
+			distribution = optarg;
+			break;
+		case 'o':
+			g_file_name = optarg;
+			break;
 		default:
 			usage(argv[0]);
 			return 1;
@@ -992,6 +1056,10 @@ parse_args(int argc, char **argv)
 		return 1;
 	}
 
+	if (g_open_loop && !strcmp(distribution, "fixed")){
+		g_fixed = 1;
+	}
+	
 	if (strcmp(workload_type, "read") &&
 	    strcmp(workload_type, "write") &&
 	    strcmp(workload_type, "randread") &&
