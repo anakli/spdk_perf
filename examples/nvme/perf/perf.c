@@ -35,6 +35,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
+#include <math.h>
 
 #include <rte_config.h>
 #include <rte_cycles.h>
@@ -141,6 +142,7 @@ struct worker_thread {
 static int g_outstanding_commands;
 
 static bool g_latency_tracking_enable = false;
+static bool g_open_loop = false;
 
 struct rte_mempool *request_mempool;
 static struct rte_mempool *task_pool;
@@ -150,6 +152,8 @@ static struct ns_entry *g_namespaces = NULL;
 static int g_num_namespaces = 0;
 static struct worker_thread *g_workers = NULL;
 static int g_num_workers = 0;
+static uint32_t g_fixed = 0;
+static int dropped_count = 0;
 
 static uint64_t g_tsc_rate;
 
@@ -159,6 +163,8 @@ static int g_is_random;
 static int g_queue_depth;
 static int g_time_in_sec;
 static uint32_t g_max_completions;
+static uint32_t g_lambda;  //avg requests per second to generate (exponential distribution)
+static double g_avg_req_per_cycle;
 
 static const char *g_core_mask;
 
@@ -418,6 +424,12 @@ submit_single_io(struct ns_worker_ctx *ns_ctx)
 	int			rc;
 	struct ns_entry		*entry = ns_ctx->entry;
 
+	if (g_open_loop && ns_ctx->current_queue_depth >= (uint64_t) g_queue_depth){
+		//printf("Drop request\n");
+		dropped_count++;
+		return;
+	}
+	
 	if (rte_mempool_get(task_pool, (void **)&task) != 0) {
 		fprintf(stderr, "task_pool rte_mempool_get failed\n");
 		exit(1);
@@ -511,7 +523,7 @@ task_complete(struct perf_task *task)
 	 * to complete.  In this case, do not submit a new I/O to replace
 	 * the one just completed.
 	 */
-	if (!ns_ctx->is_draining) {
+	if (!g_open_loop && !ns_ctx->is_draining) {
 		submit_single_io(ns_ctx);
 	}
 }
@@ -609,12 +621,28 @@ cleanup_ns_worker_ctx(struct ns_worker_ctx *ns_ctx)
 	}
 }
 
+
+static uint64_t
+time_to_gen_next_req(void)
+{
+	double time_delta_cycles;
+
+	if (g_fixed) {
+		time_delta_cycles = (double) 1 / g_avg_req_per_cycle;
+	} else { //exponential
+		time_delta_cycles = - log(drand48())/g_avg_req_per_cycle;
+	}
+
+	return rte_get_timer_cycles() + time_delta_cycles;
+}
+
 static int
 work_fn(void *arg)
 {
 	uint64_t tsc_end;
 	struct worker_thread *worker = (struct worker_thread *)arg;
 	struct ns_worker_ctx *ns_ctx = NULL;
+	uint64_t tsc_next_gen;
 
 	printf("Starting thread on core %u\n", worker->lcore);
 
@@ -630,27 +658,63 @@ work_fn(void *arg)
 
 	tsc_end = rte_get_timer_cycles() + g_time_in_sec * g_tsc_rate;
 
-	/* Submit initial I/O for each namespace. */
-	ns_ctx = worker->ns_ctx;
-	while (ns_ctx != NULL) {
-		submit_io(ns_ctx, g_queue_depth);
-		ns_ctx = ns_ctx->next;
+	if (g_open_loop) {
+		ns_ctx = worker->ns_ctx;
+		submit_single_io(ns_ctx);
+		tsc_next_gen = time_to_gen_next_req();
+		if (ns_ctx->next != NULL){
+			printf("WARNING: open-loop load generation uses a single worker. User specificed more workers; will be ignored.\n");
+		}
+		while (1) {
+			/*
+			 * Check for completed I/O for each controller. A new
+			 * I/O will be submitted in the io_complete callback
+			 * to replace each I/O that is completed.
+			 */
+		//	ns_ctx = worker->ns_ctx;
+			
+			if (rte_get_timer_cycles() > tsc_next_gen) {
+				//count_dropped += submit_single_io(ns_ctx);
+				submit_single_io(ns_ctx);
+				tsc_next_gen = time_to_gen_next_req();
+				//count++;
+			}
+
+		//	while (ns_ctx != NULL) {
+				check_io(ns_ctx);
+		//		ns_ctx = ns_ctx->next;
+		//	}
+
+			
+			if (rte_get_timer_cycles() > tsc_end) {
+				break;
+			}
+		}
 	}
 
-	while (1) {
-		/*
-		 * Check for completed I/O for each controller. A new
-		 * I/O will be submitted in the io_complete callback
-		 * to replace each I/O that is completed.
-		 */
+	else { // closed-loop load gen (default)
+		/* Submit initial I/O for each namespace. */
 		ns_ctx = worker->ns_ctx;
 		while (ns_ctx != NULL) {
-			check_io(ns_ctx);
+			submit_io(ns_ctx, g_queue_depth);
 			ns_ctx = ns_ctx->next;
 		}
 
-		if (rte_get_timer_cycles() > tsc_end) {
-			break;
+		while (1) {
+			/*
+			 * Check for completed I/O for each controller. A new
+			 * I/O will be submitted in the io_complete callback
+			 * to replace each I/O that is completed.
+			 */
+			ns_ctx = worker->ns_ctx;
+			while (ns_ctx != NULL) {
+				check_io(ns_ctx);
+				ns_ctx = ns_ctx->next;
+			}
+
+			if (rte_get_timer_cycles() > tsc_end) {
+				break;
+			}
 		}
 	}
 
@@ -682,6 +746,9 @@ static void usage(char *program_name)
 	printf("\t\t(default: 1)]\n");
 	printf("\t[-m max completions per poll]\n");
 	printf("\t\t(default: 0 - unlimited)\n");
+	printf("\t[-L lambda (avg arrival req rate)]\n");
+	printf("\t\t(if specificied, I/O generator is open-loop with exponential distribution)\n");
+	printf("\t\t(default: no lambda (closed-loop I/O generator based on queue depth) )\n");
 }
 
 static double
@@ -763,6 +830,10 @@ print_performance(void)
 			printf("%-55s: %10.2f IO/s %10.2f MB/s %10.2f us(average latency)\n",
 				   "Total writes", total_io_per_second[i], total_mb_per_second[i], total_average_latency[i]);
 		}
+	}
+
+	if (g_open_loop){
+		printf("Dropped %d requests\n", dropped_count);
 	}
 
 	printf("\n");
@@ -864,8 +935,10 @@ parse_args(int argc, char **argv)
 	g_rw_percentage = -1;
 	g_core_mask = NULL;
 	g_max_completions = 0;
+	g_open_loop = false;
+	g_lambda = 1;
 
-	while ((op = getopt(argc, argv, "c:lm:q:s:t:w:M:")) != -1) {
+	while ((op = getopt(argc, argv, "c:lm:q:s:t:w:M:L:")) != -1) {
 		switch (op) {
 		case 'c':
 			g_core_mask = optarg;
@@ -891,6 +964,10 @@ parse_args(int argc, char **argv)
 		case 'M':
 			g_rw_percentage = atoi(optarg);
 			mix_specified = true;
+			break;
+		case 'L':
+			g_open_loop = true;
+			g_lambda = strtod(optarg, NULL);
 			break;
 		default:
 			usage(argv[0]);
@@ -1198,6 +1275,7 @@ int main(int argc, char **argv)
 				       SOCKET_ID_ANY, 0);
 
 	g_tsc_rate = rte_get_timer_hz();
+	g_avg_req_per_cycle = (double) g_lambda / (double) g_tsc_rate; 
 
 	if (register_workers() != 0) {
 		rc = -1;
