@@ -54,6 +54,14 @@
 #include <fcntl.h>
 #endif
 
+#define MAX_LATENCY_SAMPLES_PER_THREAD 4194304 // 1048576
+
+enum io_type {
+	READ,			//0
+	WRITE,			//1
+	NUM_IO_TYPES	//2
+};
+
 struct ctrlr_entry {
 	struct spdk_nvme_ctrlr			*ctrlr;
 	struct spdk_nvme_intel_rw_latency_page	*latency_page;
@@ -89,11 +97,14 @@ struct ns_entry {
 
 struct ns_worker_ctx {
 	struct ns_entry		*entry;
-	uint64_t		io_completed;
-	uint64_t		total_tsc;
 	uint64_t		current_queue_depth;
 	uint64_t		offset_in_ios;
 	bool			is_draining;
+	
+	double			*lat_samples[NUM_IO_TYPES];
+	uint64_t		num_samples[NUM_IO_TYPES];
+	uint64_t		total_tsc[NUM_IO_TYPES];
+	uint64_t		io_completed[NUM_IO_TYPES];
 
 	union {
 		struct {
@@ -115,6 +126,7 @@ struct perf_task {
 	struct ns_worker_ctx	*ns_ctx;
 	void			*buf;
 	uint64_t		submit_tsc;
+	enum io_type	req_type;
 #if HAVE_LIBAIO
 	struct iocb		iocb;
 #endif
@@ -426,6 +438,7 @@ submit_single_io(struct ns_worker_ctx *ns_ctx)
 
 	if ((g_rw_percentage == 100) ||
 	    (g_rw_percentage != 0 && ((rand_r(&seed) % 100) < g_rw_percentage))) {
+		task->req_type = READ;
 #if HAVE_LIBAIO
 		if (entry->type == ENTRY_TYPE_AIO_FILE) {
 			rc = aio_submit(ns_ctx->u.aio.ctx, &task->iocb, entry->u.aio.fd, IO_CMD_PREAD, task->buf,
@@ -438,6 +451,7 @@ submit_single_io(struct ns_worker_ctx *ns_ctx)
 						   entry->io_size_blocks, io_complete, task, 0);
 		}
 	} else {
+		task->req_type = WRITE;
 #if HAVE_LIBAIO
 		if (entry->type == ENTRY_TYPE_AIO_FILE) {
 			rc = aio_submit(ns_ctx->u.aio.ctx, &task->iocb, entry->u.aio.fd, IO_CMD_PWRITE, task->buf,
@@ -462,12 +476,33 @@ static void
 task_complete(struct perf_task *task)
 {
 	struct ns_worker_ctx	*ns_ctx;
+	enum io_type			iotype;
+	uint64_t				io_latency;
+	uint64_t				num_samples;	
+	double	 				g_tsc_to_us;
+	int						index;
 
 	ns_ctx = task->ns_ctx;
+	iotype = task->req_type;
 	ns_ctx->current_queue_depth--;
-	ns_ctx->io_completed++;
-	ns_ctx->total_tsc += rte_get_timer_cycles() - task->submit_tsc;
+	ns_ctx->io_completed[iotype]++;
+	io_latency = rte_get_timer_cycles() - task->submit_tsc; //in cycles
+	ns_ctx->total_tsc[iotype] += io_latency; //rte_get_timer_cycles() - task->submit_tsc;
 
+	g_tsc_to_us = (double) 1000000 / (double) g_tsc_rate;
+	io_latency = io_latency * g_tsc_to_us; //in us
+	
+	// (Modified) reservoir sampling
+	num_samples = ns_ctx->num_samples[iotype];
+	if (num_samples < MAX_LATENCY_SAMPLES_PER_THREAD){ // keep all samples
+		ns_ctx->lat_samples[iotype][num_samples] = io_latency;
+		ns_ctx->num_samples[iotype]++;
+	}
+	else if (drand48() < 0.5){ // randomly decide whether to keep sample and overwrite old
+		index = (ns_ctx->io_completed[iotype]) % MAX_LATENCY_SAMPLES_PER_THREAD;
+		ns_ctx->lat_samples[iotype][index] = io_latency;
+	}
+	
 	rte_mempool_put(task_pool, task);
 
 	/*
@@ -520,6 +555,18 @@ drain_io(struct ns_worker_ctx *ns_ctx)
 static int
 init_ns_worker_ctx(struct ns_worker_ctx *ns_ctx)
 {
+	int j;
+	
+	for (j=0; j< NUM_IO_TYPES; j++) {
+		ns_ctx->lat_samples[j] = calloc(NUM_IO_TYPES * MAX_LATENCY_SAMPLES_PER_THREAD,
+									   sizeof(double));
+		if (!ns_ctx->lat_samples[j]){
+			printf("ERROR: Could not allocate ioq samples array\n");
+			return -1;
+		}
+	}
+
+
 	if (ns_ctx->entry->type == ENTRY_TYPE_AIO_FILE) {
 #ifdef HAVE_LIBAIO
 		ns_ctx->u.aio.events = calloc(g_queue_depth, sizeof(struct io_event));
@@ -545,6 +592,7 @@ init_ns_worker_ctx(struct ns_worker_ctx *ns_ctx)
 		}
 	}
 
+	
 	return 0;
 }
 
@@ -636,46 +684,86 @@ static void usage(char *program_name)
 	printf("\t\t(default: 0 - unlimited)\n");
 }
 
+static double
+get_nth_percentile(struct ns_worker_ctx *ctx, int io_type, int n)
+{
+	return ctx->lat_samples[io_type][n*ctx->num_samples[io_type]/100];
+}
+
 static void
 print_performance(void)
 {
-	uint64_t total_tsc, total_io_completed;
-	float io_per_second, mb_per_second, average_latency;
-	float total_io_per_second, total_mb_per_second, total_average_latency;
+	uint64_t total_tsc[NUM_IO_TYPES], total_io_completed[NUM_IO_TYPES];
+	float io_per_second[NUM_IO_TYPES], mb_per_second[NUM_IO_TYPES], average_latency[NUM_IO_TYPES];
+	float total_io_per_second[NUM_IO_TYPES], total_mb_per_second[NUM_IO_TYPES], total_average_latency[NUM_IO_TYPES];
 	struct worker_thread	*worker;
 	struct ns_worker_ctx	*ns_ctx;
+	int i;
 
-	total_io_per_second = 0;
-	total_mb_per_second = 0;
-	total_tsc = 0;
-	total_io_completed = 0;
+	
+	for (i = 0; i < NUM_IO_TYPES; i++){
+		total_io_per_second[i] = 0;
+		total_mb_per_second[i] = 0;
+		total_tsc[i] = 0;
+		total_io_completed[i] = 0;
+	}
 
 	worker = g_workers;
 	while (worker) {
 		ns_ctx = worker->ns_ctx;
 		while (ns_ctx) {
-			io_per_second = (float)ns_ctx->io_completed / g_time_in_sec;
-			mb_per_second = io_per_second * g_io_size_bytes / (1024 * 1024);
-			average_latency = (float)(ns_ctx->total_tsc / ns_ctx->io_completed) * 1000 * 1000 / g_tsc_rate;
-			printf("%-43.43s from core %u: %10.2f IO/s %10.2f MB/s %10.2f us(average latency)\n",
-			       ns_ctx->entry->name, worker->lcore,
-			       io_per_second, mb_per_second,
-			       average_latency);
-			total_io_per_second += io_per_second;
-			total_mb_per_second += mb_per_second;
-			total_tsc += ns_ctx->total_tsc;
-			total_io_completed += ns_ctx->io_completed;
+			for (i = 0; i < NUM_IO_TYPES; i++){
+				if (ns_ctx->io_completed[i] > 0){
+					io_per_second[i] = (float)ns_ctx->io_completed[i] / g_time_in_sec;
+					mb_per_second[i] = io_per_second[i] * g_io_size_bytes / (1024 * 1024);
+					average_latency[i] = (float)(ns_ctx->total_tsc[i] / ns_ctx->io_completed[i]) * 1000 * 1000 / g_tsc_rate;
+					if (i == READ){
+						printf("Read Performance Summary:\n");
+					}
+					else if (i == WRITE){
+						printf("Write Performance Summary:\n");
+					}
+					printf("%-43.43s from core %u: %10.2f IO/s %10.2f MB/s %10.2f us(average latency)\n",
+						   ns_ctx->entry->name, worker->lcore,
+						   io_per_second[i], mb_per_second[i],
+						   average_latency[i]);
+					total_io_per_second[i] += io_per_second[i];
+					total_mb_per_second[i] += mb_per_second[i];
+					total_tsc[i] += ns_ctx->total_tsc[i];
+					total_io_completed[i] += ns_ctx->io_completed[i];
+
+
+
+					printf("10th percentile: %f\n", get_nth_percentile(ns_ctx, i, 10)); 
+					printf("50th percentile: %f\n", get_nth_percentile(ns_ctx, i, 50)); 
+					printf("95th percentile: %f\n", get_nth_percentile(ns_ctx, i, 95)); 
+					printf("99th percentile: %f\n", get_nth_percentile(ns_ctx, i, 99));
+					printf("Num_sampled = %lu, Num_ios = %lu\n", ns_ctx->num_samples[i],
+						   ns_ctx->io_completed[i]);
+				}	
+			}
 			ns_ctx = ns_ctx->next;
 		}
 		worker = worker->next;
 	}
 
-	assert(total_io_completed != 0);
-	total_average_latency = (float)(total_tsc / total_io_completed) * 1000 * 1000 / g_tsc_rate;;
+	assert(total_io_completed[READ] + total_io_completed[WRITE] != 0);
+	for (i = 0; i < NUM_IO_TYPES; i++){
+		if (total_io_completed[i] == 0)
+			continue;
 
-	printf("========================================================\n");
-	printf("%-55s: %10.2f IO/s %10.2f MB/s %10.2f us(average latency)\n",
-	       "Total", total_io_per_second, total_mb_per_second, total_average_latency);
+		total_average_latency[i] = (float)(total_tsc[i] / total_io_completed[i]) * 1000 * 1000 / g_tsc_rate;;
+
+		printf("========================================================\n");
+		if (i == READ){
+			printf("%-55s: %10.2f IO/s %10.2f MB/s %10.2f us(average latency)\n",
+				   "Total reads", total_io_per_second[i], total_mb_per_second[i], total_average_latency[i]);
+		}
+		else if (i == WRITE){
+			printf("%-55s: %10.2f IO/s %10.2f MB/s %10.2f us(average latency)\n",
+				   "Total writes", total_io_per_second[i], total_mb_per_second[i], total_average_latency[i]);
+		}
+	}
 
 	printf("\n");
 }
