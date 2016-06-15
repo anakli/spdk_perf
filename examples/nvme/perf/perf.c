@@ -55,7 +55,7 @@
 #include <fcntl.h>
 #endif
 
-#define MAX_LATENCY_SAMPLES_PER_THREAD 4194304 // 1048576
+#define MAX_LATENCY_SAMPLES_PER_THREAD 524288 //1048576 //2097152 //4194304 // 1048576
 
 enum io_type {
 	READ,			//0
@@ -780,7 +780,7 @@ quickSort(double a[], int l, int r)
 	if( l < r ){
    		// divide and conquer
         j = partition( a, l, r);
-       	quickSort( a, l, j-1);
+		quickSort( a, l, j-1);
        	quickSort( a, j+1, r);
    	}
 }
