@@ -174,6 +174,9 @@ static int g_aio_optind; /* Index of first AIO filename in argv */
 static void
 task_complete(struct perf_task *task);
 
+int 
+compare_double (const void *a, const void *b);
+
 static void
 register_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
 {
@@ -755,41 +758,19 @@ static void usage(char *program_name)
 	printf("\t\t(default: exp, i.e. exponential)\n");
 }
 
-static int 
-partition(double a[], int l, int r) {
-	double t, pivot;
-	int i, j;
-   	pivot = a[l];
-   	i = l; j = r+1;
-		
-	while( 1){
-   		do ++i; while( a[i] <= pivot && i <= r );
-   		do --j; while( a[j] > pivot );
-   		if( i >= j ) break;
-   		t = a[i]; a[i] = a[j]; a[j] = t;
-   	}
-   	t = a[l]; a[l] = a[j]; a[j] = t;
-   	return j;
-}
-
-static void 
-quickSort(double a[], int l, int r)
-{
-	int j;
-
-	if( l < r ){
-   		// divide and conquer
-        j = partition( a, l, r);
-		quickSort( a, l, j-1);
-       	quickSort( a, j+1, r);
-   	}
-}
-
-
 static double
 get_nth_percentile(struct ns_worker_ctx *ctx, int io_type, int n)
 {
 	return ctx->lat_samples[io_type][n*ctx->num_samples[io_type]/100];
+}
+
+int
+compare_double (const void *a, const void *b)
+{
+	const double *da = (const double *) a;
+	const double *db = (const double *) b;
+
+	return (*da > *db) - (*da < *db);
 }
 
 static void
@@ -842,7 +823,8 @@ print_performance(void)
 					total_tsc[i] += ns_ctx->total_tsc[i];
 					total_io_completed[i] += ns_ctx->io_completed[i];
 
-					quickSort(ns_ctx->lat_samples[i], 0, ns_ctx->num_samples[i] -1);
+					qsort(ns_ctx->lat_samples[i], ns_ctx->num_samples[i], sizeof(double), &compare_double);
+					//quickSort(ns_ctx->lat_samples[i], 0, ns_ctx->num_samples[i] -1);
 					printf("10th percentile: %f\n", get_nth_percentile(ns_ctx, i, 10)); 
 					printf("50th percentile: %f\n", get_nth_percentile(ns_ctx, i, 50)); 
 					printf("95th percentile: %f\n", get_nth_percentile(ns_ctx, i, 95)); 
