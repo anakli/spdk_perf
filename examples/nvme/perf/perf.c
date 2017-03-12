@@ -154,9 +154,11 @@ static struct worker_thread *g_workers = NULL;
 static int g_num_workers = 0;
 static uint32_t g_fixed = 0;
 static int dropped_count = 0;
+static bool done = false;
+static bool g_precondition = false;
+
 
 static uint64_t g_tsc_rate;
-
 static uint32_t g_io_size_bytes;
 static int g_rw_percentage;
 static int g_is_random;
@@ -166,7 +168,6 @@ static uint32_t g_max_completions;
 static uint32_t g_lambda;  //avg requests per second to generate (exponential distribution)
 static double g_avg_req_per_cycle;
 static char* g_file_name;
-
 static const char *g_core_mask;
 
 static int g_aio_optind; /* Index of first AIO filename in argv */
@@ -447,6 +448,11 @@ submit_single_io(struct ns_worker_ctx *ns_ctx)
 		offset_in_ios = ns_ctx->offset_in_ios++;
 		if (ns_ctx->offset_in_ios == entry->size_in_ios) {
 			ns_ctx->offset_in_ios = 0;
+			if (g_precondition){
+				printf("Finished writing sequentially to whole device\n");
+				done = true;
+				return;
+			}
 		}
 	}
 
@@ -716,7 +722,7 @@ work_fn(void *arg)
 				ns_ctx = ns_ctx->next;
 			}
 
-			if (rte_get_timer_cycles() > tsc_end) {
+			if (rte_get_timer_cycles() > tsc_end || done) {
 				break;
 			}
 		}
@@ -756,6 +762,7 @@ static void usage(char *program_name)
 	printf("\t[-d distribution of inter-arrival requests (for open-loop)]\n");
 	printf("\t\t(exp, fixed)\n");
 	printf("\t\t(default: exp, i.e. exponential)\n");
+	printf("\t[-p preconditioning flag, indicates to stop test when finished writing seq to whole addr space]\n");
 }
 
 static double
@@ -978,7 +985,7 @@ parse_args(int argc, char **argv)
 	g_lambda = 1;
 	g_file_name = NULL;
 
-	while ((op = getopt(argc, argv, "c:l:m:q:s:t:w:M:L:d:o:")) != -1) {
+	while ((op = getopt(argc, argv, "c:l:m:q:s:t:w:M:L:d:o:p:")) != -1) {
 		switch (op) {
 		case 'c':
 			g_core_mask = optarg;
@@ -1014,6 +1021,9 @@ parse_args(int argc, char **argv)
 			break;
 		case 'o':
 			g_file_name = optarg;
+			break;
+		case 'p':
+			g_precondition = true;
 			break;
 		default:
 			usage(argv[0]);
