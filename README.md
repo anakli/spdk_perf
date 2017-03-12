@@ -24,37 +24,35 @@ Setup instructions for ReFlex users
 
 Follow the instructions below if you are using [ReFlex](https://github.com/stanford-mast/reflex) and have completed setup instructions 1-5 in the Reflex README. Otherwise follow instructions for general users in the next section.
 
-   ```
     # running an SPDK app requires installing DPDK
     # we can use source code in reflex/deps/dpdk directory
-   cd PATH_TO_REFLEX/reflex/deps/dpdk
-   make install T=x86_64-native-linuxapp-gcc DESTDIR=.
-   cd ../../..
+    cd PATH_TO_REFLEX/reflex/deps/dpdk
+    make install T=x86_64-native-linuxapp-gcc DESTDIR=.
+    cd ../../..
     
     # fetch SPDK modified app code and compile
-   git clone https://bitbucket.org/anakli/spdk16
-   cd spdk16
-   make DPDK_DIR=../reflex/deps/dpdk/x86_64-native-linuxapp-gcc
+    git clone https://bitbucket.org/anakli/spdk16
+    cd spdk16
+    make DPDK_DIR=../reflex/deps/dpdk/x86_64-native-linuxapp-gcc
     
     # SPDK hugepage setup
-   sudo mkdir -p /mnt/huge
-   sudo mount -t hugetlbfs nodev /mnt/huge
+    sudo mkdir -p /mnt/huge
+    sudo mount -t hugetlbfs nodev /mnt/huge
 
    
-   cd examples/nvme/perf
+    cd examples/nvme/perf
 	# modify run_perf.sh with your desired rd/wr ratio, req size, number of cores, target IOPS, etc.
     # run SPDK application to precondition SSD and/or do performance testing for cost model
-   sudo ./precondition.sh precond.csv
-   sudo ./run_perf.sh results.csv
+    sudo ./precondition.sh precond.csv
+    sudo ./run_perf.sh results.csv
 
     # teardown spdk app hugepage setup to get ready to run ReFlex
-   sudo umount /mnt/huge
-   cat /proc/meminfo | grep Huge
+    sudo umount /mnt/huge
+    cat /proc/meminfo | grep Huge
     # if no free hugepages, delete lingering hugepage files on other mount points for hugetlbfs
     #  $ cd /dev/hugepages
 	#  $ rm -f rtemap* 
-   cd PATH_TO_REFLEX/reflex
-   ```
+    cd PATH_TO_REFLEX/reflex
 
 
 Setup instructions for general users
