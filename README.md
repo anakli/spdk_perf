@@ -1,22 +1,25 @@
 Storage Performance Development Kit
 ===================================
 
-[SPDK on 01.org](https://01.org/spdk)
-
-The Storage Performance Development Kit (SPDK) provides a set of tools
+Intel's Storage Performance Development Kit (SPDK) provides a set of tools
 and libraries for writing high performance, scalable, user-mode storage
 applications. It achieves high performance by moving all of the necessary
 drivers into userspace and operating in a polled mode instead of relying on
 interrupts, which avoids kernel context switches and eliminates interrupt
 handling overhead.
 
+[SPDK on 01.org](https://01.org/spdk)
+
+
+Local Flash open-loop load generator based on SPDK perf example application
+===========================================================================
 
 This fork of SPDK v16.06 provides a modified version of the nvme `perf` example application to generate load for a local Flash performance test. The original application is modified to report read and write percentile latencies. The load generator is also modified to be open-loop, so you can sweep throughput by specifying a target IOPS instead of queue depth. You can use this load generator to precondition an SSD and/or run performance tests.
 
 If you are using [ReFlex](https://github.com/stanford-mast/reflex), a software-based system that provides remote access to Flash at the performance of local Flash, you may find this load generator useful for preconditioning your SSD and running performance tests with different read/write ratios and request sizes to derive the request cost model. 
 
 
-Setup instructions for ReFlex users:
+Setup instructions for ReFlex users
 ====================================
 
 Follow the instructions below if you are using [ReFlex](https://github.com/stanford-mast/reflex) and have completed setup instructions 1-5 in the Reflex README. Otherwise follow instructions for general users in the next section.
@@ -51,11 +54,10 @@ Follow the instructions below if you are using [ReFlex](https://github.com/stanf
     #  $ cd /dev/hugepages
 	#  $ rm -f rtemap* 
    cd PATH_TO_REFLEX/reflex
-
    ```
 
 
-Setup instructions for general users:
+Setup instructions for general users
 ====================================
 
 
