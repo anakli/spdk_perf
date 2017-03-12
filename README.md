@@ -11,8 +11,8 @@ handling overhead.
 [SPDK on 01.org](https://01.org/spdk)
 
 
-Local Flash open-loop load generator based on SPDK perf example application
-===========================================================================
+Local Flash load generator based on SPDK perf app
+=================================================
 
 This fork of SPDK v16.06 provides a modified version of the nvme `perf` example application to generate load for a local Flash performance test. The original application is modified to report read and write percentile latencies. The load generator is also modified to be open-loop, so you can sweep throughput by specifying a target IOPS instead of queue depth. You can use this load generator to precondition an SSD and/or run performance tests.
 
@@ -31,8 +31,8 @@ Follow the instructions below if you are using [ReFlex](https://github.com/stanf
     cd ../../..
     
     # fetch SPDK modified app code and compile
-    git clone https://bitbucket.org/anakli/spdk16
-    cd spdk16
+    git clone https://github.com/anakli/spdk_perf.git
+    cd spdk_perf
     make DPDK_DIR=../reflex/deps/dpdk/x86_64-native-linuxapp-gcc
     
     # SPDK hugepage setup
